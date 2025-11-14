@@ -6,8 +6,10 @@ This folder provides a practical Python implementation inspired by
 Files:
 - `graph.py` – graph representation & random graph generator
 - `dijkstra.py` – classic Dijkstra baseline
+- `bellman_ford.py` – classic Bellman-Ford baseline
 - `barrier_sssp.py` – barrier-style SSSP (BMSSP + FindPivots, simplified)
 - `experiments.py` – experiment harness
+- `visualize.py` – visualization script for generating performance plots
 
 
 # CSV Column Descriptions:
@@ -29,4 +31,34 @@ Files:
 ## Running experiments
 
 ```bash
-python -m sssp_barrier.experiments
+python experiments.py
+```
+
+This will generate `sssp_experiments.csv` with results from:
+- 4 algorithms: Dijkstra, Bellman-Ford, Barrier SSSP (with/without pivots)
+- 5 graph sizes: n = 200, 400, 800, 2000, 5000
+- 2 graph types: sparse (avg_out_degree=2), dense (avg_out_degree=8)
+- 3 case types: best, normal, worst
+- 10 noise repeats per configuration
+
+## Generating visualizations
+
+After running experiments, generate performance plots:
+
+```bash
+python visualize.py
+```
+
+This creates a `plots/` directory with:
+- Performance comparisons by graph size (n)
+- Case type comparisons (best/normal/worst)
+- Throughput comparisons
+- Memory usage comparisons
+- Comprehensive summary plots
+
+**Requirements:**
+```bash
+pip install matplotlib numpy
+```
+
+Note: The visualization script uses only standard library (csv module) and matplotlib, so pandas is not required.

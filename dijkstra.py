@@ -2,12 +2,13 @@
 from __future__ import annotations
 from typing import List, Tuple
 import heapq
+import numpy as np
 from graph import Graph
 
 
 def dijkstra_sssp(graph: Graph, src: int = 0) -> Tuple[List[float], int, int]:
     """
-    Classic Dijkstra with binary heap.
+    Classic Dijkstra with binary heap, optimized with numpy arrays.
     Returns:
         dist: list of distances
         relax_count: number of relax operations
@@ -15,11 +16,11 @@ def dijkstra_sssp(graph: Graph, src: int = 0) -> Tuple[List[float], int, int]:
     """
     n = graph.n
     INF = float("inf")
-    dist = [INF] * n
+    dist = np.full(n, INF, dtype=np.float64)
     dist[src] = 0.0
 
     heap: List[Tuple[float, int]] = [(0.0, src)]
-    visited = [False] * n
+    visited = np.zeros(n, dtype=bool)
 
     relax_count = 0
     heap_ops = 1  # initial push
@@ -42,4 +43,4 @@ def dijkstra_sssp(graph: Graph, src: int = 0) -> Tuple[List[float], int, int]:
                 heapq.heappush(heap, (nd, v))
                 heap_ops += 1
 
-    return dist, relax_count, heap_ops
+    return dist.tolist(), relax_count, heap_ops

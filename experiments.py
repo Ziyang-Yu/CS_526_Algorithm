@@ -7,19 +7,35 @@ import tracemalloc
 from typing import Dict, Any, List, Tuple
 import random
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    # Fallback if tqdm is not installed
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
+
 from graph import random_directed_graph, Graph
 from dijkstra import dijkstra_sssp
 from barrier_sssp import barrier_sssp
+from bellman_ford import bellman_ford_sssp
 
 
 def perturb_graph_weights(g: Graph, noise_std: float, seed: int | None = None) -> Graph:
-    rnd = random.Random(seed)
+    """Optimized with numpy for faster weight perturbation."""
+    import numpy as np
+    if seed is not None:
+        np.random.seed(seed)
+    
     new_g = Graph(g.n)
     for u in range(g.n):
-        for v, w in g.edges_out[u]:
-            noise = rnd.gauss(0.0, noise_std)
-            new_w = max(0.0, w + noise)
-            new_g.add_edge(u, v, new_w)
+        if len(g.edges_out[u]) > 0:
+            # Vectorized noise generation
+            weights = np.array([w for _, w in g.edges_out[u]], dtype=np.float64)
+            noise = np.random.normal(0.0, noise_std, size=len(weights))
+            new_weights = np.maximum(0.0, weights + noise)
+            
+            for (v, _), new_w in zip(g.edges_out[u], new_weights):
+                new_g.add_edge(u, v, float(new_w))
     return new_g
 
 
@@ -41,6 +57,8 @@ def run_single(
         dist, relax_count, heap_ops = barrier_sssp(graph, src=src, enable_pivots=True)
     elif algo_name == "barrier_no_pivots":
         dist, relax_count, heap_ops = barrier_sssp(graph, src=src, enable_pivots=False)
+    elif algo_name == "bellman_ford":
+        dist, relax_count, heap_ops = bellman_ford_sssp(graph, src=src)
     else:
         raise ValueError(f"Unknown algo_name={algo_name}")
 
@@ -95,28 +113,39 @@ def aggregate_noise_sensitivity(
 def run_experiments(
     output_csv: str = "sssp_experiments.csv",
     n_values: List[int] | None = None,
-    avg_out_degree: int = 4,
     base_seed: int = 42,
     noise_std: float = 0.5,
-    noise_repeats: int = 5,
+    noise_repeats: int = 10,
 ):
     """
     Run experiments for:
       - Dijkstra (baseline)
+      - Bellman-Ford (classic baseline)
       - Barrier SSSP with pivots (paper-style)
       - Barrier SSSP without pivots (ablation)
-    Across different graph sizes and noisy perturbations.
+    Across different graph sizes, graph densities (sparse/dense), and noisy perturbations.
 
     Writes a CSV with columns that make it easy to see improvements.
     """
     if n_values is None:
-        n_values = [200, 400, 800]  # adjust as needed
+        n_values = [200, 400, 800, 2000, 5000]
 
-    algos = ["dijkstra", "barrier_pivots", "barrier_no_pivots"]
+    algos = ["dijkstra", "bellman_ford", "barrier_pivots", "barrier_no_pivots"]
+    
+    # Two graph types: sparse (low avg_out_degree) and dense (high avg_out_degree)
+    graph_types = [
+        ("sparse", 2),   # sparse graph: avg_out_degree = 2
+        ("dense", 8),    # dense graph: avg_out_degree = 8
+    ]
+    
+    # Three case types: best, normal, worst
+    case_types = ["best", "normal", "worst"]
 
     fieldnames = [
         "algo",
         "variant",
+        "graph_type",
+        "case_type",
         "n",
         "m",
         "base_seed",
@@ -133,54 +162,87 @@ def run_experiments(
 
     rows: List[Dict[str, Any]] = []
 
+    # Calculate total number of configurations for progress bar
+    total_configs = len(n_values) * len(graph_types) * len(case_types) * len(algos)
+    
+    # Create a list of all configurations to iterate with progress bar
+    configs = []
     for n in n_values:
-        base_graph = random_directed_graph(
-            n=n,
-            avg_out_degree=avg_out_degree,
-            weight_range=(1.0, 10.0),
-            seed=base_seed,
-        )
-
-        for algo_name in algos:
-            all_records: List[Dict[str, Any]] = []
-
-            for i in range(noise_repeats):
-                seed = base_seed + i
-                g_pert = perturb_graph_weights(base_graph, noise_std=noise_std, seed=seed)
-                rec = run_single(algo_name, g_pert, src=0)
-                rec["noise_run_id"] = i
-                all_records.append(rec)
-
-            # Aggregate
-            agg = aggregate_noise_sensitivity(all_records)
-            mean_peak_mem_kb = sum(r["peak_mem_kb"] for r in all_records) / len(all_records)
-            mean_throughput = sum(r["throughput_edges_per_sec"] for r in all_records) / len(
-                all_records
+        for graph_type_name, avg_out_degree in graph_types:
+            for case_type in case_types:
+                for algo_name in algos:
+                    configs.append((n, graph_type_name, avg_out_degree, case_type, algo_name))
+    
+    # Cache graphs to avoid regenerating the same graph multiple times
+    graph_cache: Dict[Tuple[int, str, int, str], Graph] = {}
+    
+    # Use tqdm for progress bar
+    for n, graph_type_name, avg_out_degree, case_type, algo_name in tqdm(
+        configs, 
+        desc="Running experiments",
+        unit="config",
+        total=total_configs
+    ):
+        # Generate base graph (only once per n/graph_type/case_type combination)
+        graph_key = (n, graph_type_name, avg_out_degree, case_type)
+        if graph_key not in graph_cache:
+            graph_cache[graph_key] = random_directed_graph(
+                n=n,
+                avg_out_degree=avg_out_degree,
+                weight_range=(1.0, 10.0),
+                seed=base_seed,
+                case_type=case_type,
             )
-            mean_cache_proxy = sum(r["cache_proxy"] for r in all_records) / len(all_records)
+        
+        base_graph = graph_cache[graph_key]
+        
+        all_records: List[Dict[str, Any]] = []
 
-            row = {
-                "algo": algo_name,
-                "variant": (
-                    "baseline"
-                    if algo_name == "dijkstra"
-                    else ("paper_method" if algo_name == "barrier_pivots" else "ablation_no_pivots")
-                ),
-                "n": n,
-                "m": base_graph.m,
-                "base_seed": base_seed,
-                "noise_std": noise_std,
-                "noise_repeats": noise_repeats,
-                "latency_mean": agg["latency_mean"],
-                "latency_var": agg["latency_var"],
-                "latency_best": agg["latency_best"],
-                "latency_worst": agg["latency_worst"],
-                "mean_peak_mem_kb": mean_peak_mem_kb,
-                "mean_throughput_edges_per_sec": mean_throughput,
-                "mean_cache_proxy": mean_cache_proxy,
-            }
+        for i in range(noise_repeats):
+            seed = base_seed + i
+            g_pert = perturb_graph_weights(base_graph, noise_std=noise_std, seed=seed)
+            rec = run_single(algo_name, g_pert, src=0)
+            rec["noise_run_id"] = i
+            all_records.append(rec)
 
-            rows.append(row)
+        # Aggregate
+        agg = aggregate_noise_sensitivity(all_records)
+        mean_peak_mem_kb = sum(r["peak_mem_kb"] for r in all_records) / len(all_records)
+        mean_throughput = sum(r["throughput_edges_per_sec"] for r in all_records) / len(
+            all_records
+        )
+        mean_cache_proxy = sum(r["cache_proxy"] for r in all_records) / len(all_records)
+
+        # Determine variant
+        if algo_name == "dijkstra":
+            variant = "baseline"
+        elif algo_name == "bellman_ford":
+            variant = "baseline_bf"
+        elif algo_name == "barrier_pivots":
+            variant = "paper_method"
+        else:  # barrier_no_pivots
+            variant = "ablation_no_pivots"
+
+        row = {
+            "algo": algo_name,
+            "variant": variant,
+            "graph_type": graph_type_name,
+            "case_type": case_type,
+            "n": n,
+            "m": base_graph.m,
+            "base_seed": base_seed,
+            "noise_std": noise_std,
+            "noise_repeats": noise_repeats,
+            "latency_mean": agg["latency_mean"],
+            "latency_var": agg["latency_var"],
+            "latency_best": agg["latency_best"],
+            "latency_worst": agg["latency_worst"],
+            "mean_peak_mem_kb": mean_peak_mem_kb,
+            "mean_throughput_edges_per_sec": mean_throughput,
+            "mean_cache_proxy": mean_cache_proxy,
+        }
+
+        rows.append(row)
 
     # Write CSV
     with open(output_csv, "w", newline="") as f:

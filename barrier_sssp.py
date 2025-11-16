@@ -1,6 +1,7 @@
 # sssp_barrier/barrier_sssp.py
 from __future__ import annotations
 from typing import List, Tuple, Dict, Set
+import random
 import heapq
 from graph import Graph
 
@@ -25,6 +26,7 @@ class BarrierSSSP:
         enable_pivots: bool = True,
         log_k_power: float = 1.0 / 3.0,
         log_t_power: float = 2.0 / 3.0,
+        pivot_sample_ratio: float = 0.5,
     ):
         self.g = graph
         self.src = src
@@ -48,6 +50,10 @@ class BarrierSSSP:
         self.t = max(1, int(logn ** log_t_power))
 
         self.enable_pivots = enable_pivots
+
+        # 随机抽样 pivot 的比例（0~1），默认 0.5 表示从 S 中随机抽取约一半作为候选 pivot
+        # 取值会被裁剪到 [0.0, 1.0]，并且在实际采样时至少保留 1 个 pivot。
+        self.pivot_sample_ratio = max(0.0, min(1.0, pivot_sample_ratio))
 
     # --- Helpers ---------------------------------------------------------
 
@@ -125,6 +131,8 @@ class BarrierSSSP:
         Otherwise we build the forest F and choose pivots as roots with >= k nodes.
         """
         # We treat all nodes in S as "complete" at this moment.
+        # 注意：随机化只作用于 pivot 的选择（即 P 的子集），而 W 的扩展仍然从完整的 S 出发，
+        # 以保持与原 FindPivots 相同的“覆盖范围”，只是在选择 pivot 根时引入随机性以改善最坏结构。
         W: Set[int] = set(S)
         W_prev: Set[int] = set(S)
 
@@ -169,13 +177,29 @@ class BarrierSSSP:
                     sz += subtree_size(ch, visited)
             return sz
 
+        # --- 随机选择候选 pivot 子集 ----------------------------------------
+        # 从 S 中随机采样一部分作为 pivot 候选集合，以减少在特定糟糕结构下始终选择“坏” pivot 的概率。
+        # 当 pivot_sample_ratio >= 1.0 或 |S| 较小时，本质上退化为使用全部 S。
+        if len(S) == 0:
+            pivot_candidates: Set[int] = set()
+        else:
+            s_list = list(S)
+            # 根据比例计算样本大小，至少为 1
+            sample_size = max(1, int(len(s_list) * self.pivot_sample_ratio))
+            sample_size = min(sample_size, len(s_list))
+            if sample_size >= len(s_list):
+                pivot_candidates = set(s_list)
+            else:
+                pivot_candidates = set(random.sample(s_list, sample_size))
+
         P: List[int] = []
         visited: Set[int] = set()
         for r in roots:
             if r in visited:
                 continue
             sz = subtree_size(r, visited)
-            if r in S and sz >= self.k:
+            # 只在随机选出的 pivot 候选集合中挑选根，大小阈值仍为 >= k
+            if r in pivot_candidates and sz >= self.k:
                 P.append(r)
 
         return P, list(W)
